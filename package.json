@@ -1,0 +1,56 @@
+{
+  "name": "kie-mcp",
+  "version": "0.1.0",
+  "description": "Trending dev-tool radar with personalized fit, as an MCP server for Claude Code and Cursor",
+  "type": "module",
+  "license": "MIT",
+  "author": "Aryan Gaddala <aryangaddala7@gmail.com>",
+  "homepage": "https://github.com/aryangv/kie#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aryangv/kie.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aryangv/kie/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude-code",
+    "cursor",
+    "developer-tools",
+    "trending",
+    "github",
+    "ai-agent",
+    "dev-tools"
+  ],
+  "bin": {
+    "kie-mcp": "dist/mcp/server.js",
+    "kie-daemon": "dist/scheduler/daemon.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/mcp/server.js",
+    "daemon": "node dist/scheduler/daemon.js",
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "node --test --import tsx ./src/**/*.test.ts",
+    "inspector": "npm run build && npx @modelcontextprotocol/inspector node dist/mcp/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "better-sqlite3": "^11.8.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
