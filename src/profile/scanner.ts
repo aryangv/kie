@@ -21,6 +21,10 @@ export interface ScannedSignal {
   dependency: string;
   /** Language implied by the manifest, e.g. "typescript", "python". */
   language: string;
+  /** Manifest file mtime (unix seconds) — a proxy for how recently you worked
+   * in this repo, used to recency-weight the signal. Optional for callers (e.g.
+   * tests) that construct signals without touching the filesystem. */
+  mtime?: number;
 }
 
 /** Manifests we know how to parse, mapped to their default language. Languages
@@ -64,18 +68,18 @@ function walk(dir: string, depth: number, out: ScannedSignal[]) {
   }
   for (const entry of entries) {
     const full = join(dir, entry);
-    let isDir = false;
+    let stat: ReturnType<typeof statSync>;
     try {
-      isDir = statSync(full).isDirectory();
+      stat = statSync(full);
     } catch {
       continue;
     }
-    if (isDir) {
+    if (stat.isDirectory()) {
       if (SKIP_DIRS.has(entry) || entry.startsWith(".")) continue;
       walk(full, depth + 1, out);
     } else if (isManifestFile(entry)) {
       try {
-        parseManifest(dir, entry, out);
+        parseManifest(dir, entry, out, Math.floor(stat.mtimeMs / 1000));
       } catch {
         // ignore malformed manifests
       }
@@ -83,7 +87,7 @@ function walk(dir: string, depth: number, out: ScannedSignal[]) {
   }
 }
 
-function parseManifest(repoPath: string, manifest: string, out: ScannedSignal[]) {
+function parseManifest(repoPath: string, manifest: string, out: ScannedSignal[], mtime?: number) {
   const content = readFileSync(join(repoPath, manifest), "utf8");
   let language = MANIFEST_LANG[manifest] ?? (manifest.endsWith(".csproj") ? "c#" : "unknown");
   let deps: string[] = [];
@@ -117,7 +121,7 @@ function parseManifest(repoPath: string, manifest: string, out: ScannedSignal[])
   for (const dep of deps) {
     // Key by the full manifest directory so two repos that share a folder
     // basename aren't collapsed into one (which undercounted dependency reach).
-    out.push({ repoPath, manifest, dependency: dep, language });
+    out.push({ repoPath, manifest, dependency: dep, language, mtime });
   }
 }
 

@@ -31,7 +31,39 @@ test("a fresh DB is migrated to the current schema version", () => {
   const store = new Store(":memory:");
   assert.equal(userVersion(store.db), CURRENT_SCHEMA_VERSION);
   assert.ok(hasColumn(store.db, "tools", "readme"));
+  // v3 inference columns.
+  assert.ok(hasColumn(store.db, "profile", "confidence"));
+  assert.ok(hasColumn(store.db, "profile_signals", "mtime"));
   store.close();
+});
+
+test("v3 migration backfills inference columns on a legacy profile schema", () => {
+  // A DB at v2 (has readme) but predating the inference columns.
+  const db = new Database(":memory:");
+  db.pragma("user_version = 2");
+  db.exec(`CREATE TABLE profile (
+    key TEXT PRIMARY KEY, kind TEXT NOT NULL, label TEXT NOT NULL,
+    category TEXT, weight REAL NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL
+  )`);
+  db.exec(`CREATE TABLE profile_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, repo_path TEXT NOT NULL, manifest TEXT NOT NULL,
+    dependency TEXT NOT NULL, seen_at INTEGER NOT NULL, UNIQUE (repo_path, manifest, dependency)
+  )`);
+  db.prepare("INSERT INTO profile(key, kind, label, weight, updated_at) VALUES (?,?,?,?,?)").run(
+    "library:react", "library", "react", 2, 1,
+  );
+  assert.ok(!hasColumn(db, "profile", "confidence"), "precondition: no confidence column");
+
+  runMigrations(db);
+
+  assert.equal(userVersion(db), CURRENT_SCHEMA_VERSION);
+  assert.ok(hasColumn(db, "profile", "confidence"));
+  assert.ok(hasColumn(db, "profile_signals", "mtime"));
+  const row = db.prepare("SELECT confidence FROM profile WHERE key = 'library:react'").get() as
+    | { confidence: number }
+    | undefined;
+  assert.equal(row?.confidence, 1, "existing rows default to confidence 1");
+  db.close();
 });
 
 test("runMigrations is idempotent — re-running applies nothing", () => {

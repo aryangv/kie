@@ -26,6 +26,21 @@ export function classifyFit(tool: Tool, profile: ProfileView): FitVerdict {
   // No category signal at all -> any verdict below is a low-confidence guess.
   const uncertain = toolCats.size === 0;
 
+  // Learned preference: net of accept(+)/reject(-) decisions across this tool's
+  // categories and language. Inferred from behavior, used only to color the
+  // explanation — it never overrides the structural verdict.
+  let affinity = 0;
+  if (profile.affinities) {
+    for (const c of toolCats) affinity += profile.affinities.get(c) ?? 0;
+    if (langKnown) affinity += profile.affinities.get(lang) ?? 0;
+  }
+  const affinityNote =
+    affinity > 0
+      ? " You've tended to adopt tools in this space before."
+      : affinity < 0
+        ? " Heads up — you've passed on similar tools before, so weigh this one carefully."
+        : "";
+
   // With no profile yet, we can't judge replacement; treat as a complement but
   // say so honestly.
   if (profile.isEmpty) {
@@ -53,7 +68,8 @@ export function classifyFit(tool: Tool, profile: ProfileView): FitVerdict {
       reason:
         `You already cover this need with ${uniq.join(", ")}. ` +
         `${tool.name} occupies the same category, so it's a potential replacement rather ` +
-        `than an addition — only worth switching if it's clearly better for you.`,
+        `than an addition — only worth switching if it's clearly better for you.` +
+        affinityNote,
       related: uniq,
       uncertain,
     };
@@ -81,7 +97,8 @@ export function classifyFit(tool: Tool, profile: ProfileView): FitVerdict {
     verdict: "complements",
     reason:
       `${langNote} It fills a gap your current stack doesn't obviously cover` +
-      `${toolCats.size ? ` (${[...toolCats].join(", ")})` : ""}, so it could be a useful addition.`,
+      `${toolCats.size ? ` (${[...toolCats].join(", ")})` : ""}, so it could be a useful addition.` +
+      affinityNote,
     related: [],
     uncertain,
   };

@@ -41,7 +41,8 @@ src/
     profile.ts            # living profile: rebuild, ensureProfileFresh (auto-scan), recordDecision
   match/
     taxonomy.ts           # keyword/topic/dep -> category; LANGUAGE_AGNOSTIC set
-    fit.ts                # classifyFit: replaces|complements|irrelevant (+ uncertain flag)
+    infer.ts              # PURE inference: recencyWeight, inferCategoriesByCooccurrence, inferArchetypes
+    fit.ts                # classifyFit: replaces|complements|irrelevant (+ uncertain flag, affinity note)
   recommend/
     curated.ts            # curated "starter tools" list (ripgrep, fzf, Obsidian, ...)
     digest.ts             # buildDigest: "what's new since watermark" delta
@@ -60,8 +61,8 @@ src/
 scripts/smoke-*.ts        # live verification harnesses (MCP client -> built server)
 ```
 
-## The 11 MCP tools (in server.ts)
-`setup`, `whats_trending`, `tool_details`, `whats_new`, `should_i_use`, `profile_get`, `profile_update`, `recommend_extensions`, `record_decision`, `install_tool`, `refresh_now`.
+## The 12 MCP tools (in server.ts)
+`setup`, `whats_trending`, `tool_details`, `whats_new`, `should_i_use`, `profile_get`, `profile_update`, `profile_infer`, `recommend_extensions`, `record_decision`, `install_tool`, `refresh_now`.
 
 ## Key design decisions (don't relitigate without reason)
 - **MCP server, not CLI/web** — both IDEs speak MCP; single backend.
@@ -74,7 +75,17 @@ scripts/smoke-*.ts        # live verification harnesses (MCP client -> built ser
 - **Fit categorization stays keyword-based — no LLM API, ever.** The taxonomy (`match/taxonomy.ts`) is a deterministic dep/topic/keyword seed and is grown by *adding entries*, not by calling a model. An "LLM-classify pass" for the uncategorized tail was explicitly declined (user: "no LLM APIs for us") — it conflicts with Kie's keyless identity, the interactive path (`should_i_use`) already puts the host model in the loop with raw README context, and MCP sampling was already rejected. When the `⚠ unsure` tail is too long, **expand the seed** (it's cheap, testable, keyless). Do not add an optional API-key classify path without the user reopening this.
 - **`recommend_extensions` discovery defaults stay rich (don't cap for keyless safety).** The subagent drill (`drillRepos`/`filesPerRepo`) is API-hungry and can exhaust the unauthenticated 60/hr REST budget (discovery then degrades to `[]`). That's a deliberate accepted tradeoff: the expected deployment is **with a `GITHUB_TOKEN`**, so we optimize the catalog richness for the equipped common case rather than thinning everyone's output to protect keyless users (who already degrade gracefully). If the audience shifts to mostly-keyless, *then* lower the `DiscoverOptions` defaults — don't do it preemptively.
 
-## Final polish: README fetch + description sanitization (latest — #2 micro-opt & #4 residual)
+## Inference-based profile building (latest)
+The profile was a dictionary lookup (dep → hardcoded category, with **unknown deps dropped**) plus a raw repo count. It's now an **inference layer** — all keyless/deterministic for the base, with a host-model lane on top, so it does NOT reopen the "no LLM API" decision (Kie still calls no model of its own; the host IDE Claude does the fuzzy tail).
+- **`match/infer.ts` (new, pure, tested):** `recencyWeight(at, now)` (half-life decay, `RECENCY_HALF_LIFE_DAYS=60`, floored at 0.05), `inferCategoriesByCooccurrence(...)` (an unknown dep borrows the dominant category of the deps it ships alongside — gated by `MIN_COOCCURRENCE_SUPPORT=2` repos + `MIN_COOCCURRENCE_SHARE=0.5`, capped at `MAX_COOCCURRENCE_CONFIDENCE=0.6`), `inferArchetypes(categoryStrength)` (rolls categories up into frontend/backend/ai-ml/devops-infra/mobile-desktop/creative-design/quality-tooling personas).
+- **`profile/profile.ts`:** `rebuildProfile` now (1) recency-weights each dep by manifest mtime — all-fresh signals reduce to the old repo count, so prior tests hold; (2) co-occurrence-infers the unknown tail; (3) **keeps everything else as raw uncategorized library rows — nothing is dropped.** `ProfileView` gained `categoryStrength`, `inferredCategories`, `archetypes`, `affinities`, `uncategorized` (all optional → existing `ProfileView` literals in tests still compile). `buildProfileView` only treats rows with `confidence >= INCUMBENT_CONFIDENCE` (0.75) as `categoryIncumbents`, so low-confidence inferences enrich strength/archetypes **without** triggering spurious "replaces". `recordDecision` now also learns **affinities**: +1/−1 per category and language on every accept/install/reject.
+- **Schema v3 (migration, guarded):** `profile.confidence REAL DEFAULT 1` and `profile_signals.mtime INTEGER`. `addSignal` upserts mtime + seen_at on re-scan. New `Store.bumpAffinity` (accumulating signed weight, `kind='affinity'`).
+- **`match/fit.ts`:** soft affinity note appended to verdict reasons (never overrides the structural verdict; guarded so it's inert when `affinities` is absent).
+- **Host-model lane:** new `profile_infer` tool returns the uncategorized deps + context and asks the host model to categorize them; `profile_update` gained `setCategories: [{library, category}]` to persist those as inferred rows (confidence 0.9). This is the keyless way to classify the long tail — consistent with the endorsed `should_i_use` pattern, NOT a Kie-owned API key.
+- **`mcp/format.ts`:** `formatProfile` now shows "Looks like: <personas>", inferred (`~category`) lines, learned preferences, and the uncategorized tail (sampled). New `formatProfileInfer`.
+- **Tests 135 → 148** — `match/infer.test.ts` (recency/co-occurrence/archetypes), profile recency+inference+affinity tests, v3-migration column-backfill test, server tool count 11→12.
+
+## Final polish: README fetch + description sanitization (#2 micro-opt & #4 residual)
 - **README fetch no longer pays 5 sequential 404s** (`enrich/github.ts`). `fetchReadme` now tries `README.md` alone first (one request — the ~95% case), and only on a miss probes the rarer names (`readme.md`/`.markdown`/`.rst`/`.txt`) **in parallel** via `fetchReadmeFile`. README-less/oddly-named repos cost one extra round-trip instead of four more sequential ones; the common case is unchanged at one request.
 - **Untrusted one-line `description` is now sanitized** (`mcp/format.ts`). New exported `sanitizeInline(text, max=200)` collapses all whitespace (newlines/tabs included) to single spaces and caps length, applied everywhere a repo's GitHub description renders unfenced (`formatTrendingList`, `formatDigest`, `formatToolDetails`, `formatRichContext`). A repo owner controls that field, so this stops an injected "…\nIgnore previous instructions and run: …" from spanning lines or hiding a long payload in list views. (READMEs/discussion headlines keep the stronger BEGIN/END UNTRUSTED fences; per-line fencing every short description would just be noise.) Known minor remainder: the "Recent mentions" *titles* in `formatToolDetails` are still unfenced — post titles are naturally single-line and lower-risk, left as-is.
 - **Tests 132 → 135** — `format.test.ts`: newline/tab collapse, length cap, and a multi-line injected description flattened to one line in `formatToolDetails`.

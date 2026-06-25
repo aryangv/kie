@@ -3,7 +3,7 @@
 // Cursor.
 //
 // Discovery:  whats_trending, tool_details, refresh_now
-// Personal:   should_i_use, profile_get, profile_update, record_decision
+// Personal:   should_i_use, profile_get, profile_update, profile_infer, record_decision
 // Action:     install_tool (returns commands; the agent runs them after consent)
 
 import "../env.js"; // must be first: populate process.env before other modules load
@@ -40,6 +40,7 @@ import {
   formatFit,
   formatInstallSummary,
   formatProfile,
+  formatProfileInfer,
   formatRichContext,
   formatStarters,
   formatToolDetails,
@@ -252,14 +253,34 @@ export function createKieServer(store: Store): McpServer {
         roots: z.array(z.string()).optional().describe("Override code roots for this scan"),
         addLanguages: z.array(z.string()).optional(),
         addLibraries: z.array(z.string()).optional().describe("Library names (auto-categorized)"),
+        setCategories: z
+          .array(z.object({ library: z.string(), category: z.string() }))
+          .optional()
+          .describe(
+            "Host-model inference: assign a category to a (usually uncategorized) library. " +
+              "Stored as an inferred entry. Pair with profile_infer.",
+          ),
         removeKeys: z.array(z.string()).optional().describe("Profile row keys to remove"),
       },
     },
-    async ({ rescan, roots, addLanguages, addLibraries, removeKeys }) => {
+    async ({ rescan, roots, addLanguages, addLibraries, setCategories, removeKeys }) => {
       const now = Math.floor(Date.now() / 1000);
       if (removeKeys?.length) {
         const ph = removeKeys.map(() => "?").join(",");
         store.db.prepare(`DELETE FROM profile WHERE key IN (${ph})`).run(...removeKeys);
+      }
+      for (const { library, category } of setCategories ?? []) {
+        store.upsertProfileRow({
+          key: `library:${library.toLowerCase()}`,
+          kind: "library",
+          label: library,
+          category: category.toLowerCase(),
+          // Model-inferred: high enough to count toward fit/archetypes, but < an
+          // observed dependency so it stays distinguishable as an inference.
+          confidence: 0.9,
+          weight: 1,
+          now,
+        });
       }
       for (const lang of addLanguages ?? []) {
         store.upsertProfileRow({
@@ -293,6 +314,20 @@ export function createKieServer(store: Store): McpServer {
       }
       return text(formatProfile(buildProfileView(store)));
     },
+  );
+
+  server.registerTool(
+    "profile_infer",
+    {
+      title: "Infer the uncategorized tail",
+      description:
+        "Hand the uncategorized dependencies from your scanned stack to you (the model) to " +
+        "categorize, then write them back with profile_update { setCategories }. The keyless " +
+        "way to classify tools the static taxonomy doesn't know — keeps the profile inference-" +
+        "driven without Kie calling any LLM API of its own.",
+      inputSchema: {},
+    },
+    async () => text(formatProfileInfer(ensureProfileFresh(store))),
   );
 
   server.registerTool(

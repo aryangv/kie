@@ -12,11 +12,33 @@ import type { Store, ProfileRow } from "../store/db.js";
 import type { Tool } from "../types.js";
 import { scanRoots, type ScannedSignal } from "./scanner.js";
 import { categorize, categorizeDependency } from "../match/taxonomy.js";
+import {
+  recencyWeight,
+  inferCategoriesByCooccurrence,
+  inferArchetypes,
+  type Archetype,
+} from "../match/infer.js";
+
+/** Confidence at/above which a category row counts as an "incumbent" the fit
+ * classifier can treat as "you already do this". Observed deps are 1.0; low-
+ * confidence co-occurrence inferences sit below this so they enrich the picture
+ * without forcing a "replaces" verdict. */
+export const INCUMBENT_CONFIDENCE = 0.75;
 
 export interface ProfileView {
   languages: Set<string>; // lowercased
-  /** category -> the stack items already covering it. */
+  /** category -> the stack items already covering it (high-confidence only). */
   categoryIncumbents: Map<string, string[]>;
+  /** category -> recency-weighted, confidence-scaled total strength (all rows). */
+  categoryStrength?: Map<string, number>;
+  /** Categories present ONLY via low-confidence inference (no observed incumbent). */
+  inferredCategories?: Set<string>;
+  /** Inferred developer personas, strongest first. */
+  archetypes?: Archetype[];
+  /** Learned accept(+)/reject(-) affinity per category or language label. */
+  affinities?: Map<string, number>;
+  /** Observed dependencies the taxonomy still can't categorize (the raw tail). */
+  uncategorized?: string[];
   rows: ProfileRow[];
   isEmpty: boolean;
 }
@@ -39,21 +61,26 @@ function titleCaseLang(lang: string): string {
   return special[lang] ?? lang;
 }
 
-/** Persist scanned signals, then rebuild the language + library profile rows. */
+/** Persist scanned signals, then rebuild the language + library profile rows.
+ *
+ * Three inference passes turn the raw signals into a richer profile:
+ *  1. Recency weighting — a dep's weight is the sum, over the repos that declare
+ *     it, of how recently each was touched (manifest mtime). Stale projects fade;
+ *     what you work on *now* dominates. (All-fresh signals reduce to repo count,
+ *     preserving the old semantics.)
+ *  2. Co-occurrence categorization — deps the taxonomy doesn't know are inferred
+ *     from the categories they ship alongside, instead of being dropped.
+ *  3. Anything still unknown is kept as a raw, uncategorized library row — the
+ *     distinctive tail the host model (or a future taxonomy entry) can place. */
 export function rebuildProfile(store: Store, signals: ScannedSignal[]): ProfileView {
   const now = Math.floor(Date.now() / 1000);
   for (const s of signals) {
-    store.addSignal(s.repoPath, s.manifest, s.dependency, now);
+    store.addSignal(s.repoPath, s.manifest, s.dependency, now, s.mtime ?? null);
   }
 
   // Aggregate across ALL persisted signals (not just this scan) so the profile
   // accrues over time.
   const all = store.allSignals();
-  const langRepos = new Map<string, Set<string>>();
-  const depRepos = new Map<string, Set<string>>();
-  // Re-derive language per (repo, manifest): a package.json with typescript dep
-  // counts as TypeScript. We approximate using the scan's language hints when
-  // present, else the manifest default.
   const manifestLang: Record<string, string> = {
     "package.json": "javascript",
     "requirements.txt": "python",
@@ -65,42 +92,80 @@ export function rebuildProfile(store: Store, signals: ScannedSignal[]): ProfileV
   for (const sig of all) {
     if (sig.dependency === "typescript") tsRepos.add(sig.repo_path);
   }
+
+  // Per (dep, repo) keep the most-recent recency weight; per language track the
+  // recency-weighted reach; collect each repo's dep set for co-occurrence.
+  const langRepoRecency = new Map<string, Map<string, number>>();
+  const depRepoRecency = new Map<string, Map<string, number>>();
+  const repoDeps = new Map<string, Set<string>>();
   for (const sig of all) {
+    const rw = recencyWeight(sig.mtime ?? sig.seen_at, now);
     let lang = manifestLang[sig.manifest] ?? "unknown";
     if (sig.manifest === "package.json" && tsRepos.has(sig.repo_path)) lang = "typescript";
-    if (!langRepos.has(lang)) langRepos.set(lang, new Set());
-    langRepos.get(lang)!.add(sig.repo_path);
-
-    if (!depRepos.has(sig.dependency)) depRepos.set(sig.dependency, new Set());
-    depRepos.get(sig.dependency)!.add(sig.repo_path);
+    bumpRepoRecency(langRepoRecency, lang, sig.repo_path, rw);
+    bumpRepoRecency(depRepoRecency, sig.dependency, sig.repo_path, rw);
+    if (!repoDeps.has(sig.repo_path)) repoDeps.set(sig.repo_path, new Set());
+    repoDeps.get(sig.repo_path)!.add(sig.dependency);
   }
 
+  // Infer categories for the deps the taxonomy can't place, from their company.
+  const inferred = inferCategoriesByCooccurrence({
+    repos: [...repoDeps.values()].map((s) => ({ deps: [...s] })),
+    categoryOf: (d) => categorizeDependency(d),
+  });
+
   store.clearProfileKinds(["language", "library"]);
-  for (const [lang, repos] of langRepos) {
+  for (const [lang, repos] of langRepoRecency) {
     if (lang === "unknown") continue;
     store.upsertProfileRow({
       key: `language:${lang}`,
       kind: "language",
       label: titleCaseLang(lang),
       category: null,
-      weight: repos.size,
+      weight: sumWeights(repos),
+      confidence: 1,
       now,
     });
   }
-  for (const [dep, repos] of depRepos) {
-    const category = categorizeDependency(dep);
-    if (!category) continue; // keep the profile to recognized stack tech
+  for (const [dep, repos] of depRepoRecency) {
+    const weight = sumWeights(repos);
+    const observed = categorizeDependency(dep);
+    const inf = observed ? undefined : inferred.get(dep);
     store.upsertProfileRow({
       key: `library:${dep}`,
       kind: "library",
       label: dep,
-      category,
-      weight: repos.size,
+      // observed category (confidence 1), else inferred (confidence <1), else
+      // kept as a raw uncategorized row so nothing distinctive is discarded.
+      category: observed ?? inf?.category ?? null,
+      weight,
+      confidence: observed ? 1 : (inf?.confidence ?? 1),
       now,
     });
   }
 
   return buildProfileView(store);
+}
+
+/** Track the best (most-recent) recency weight for a key within each repo. */
+function bumpRepoRecency(
+  map: Map<string, Map<string, number>>,
+  key: string,
+  repo: string,
+  rw: number,
+) {
+  let repos = map.get(key);
+  if (!repos) {
+    repos = new Map();
+    map.set(key, repos);
+  }
+  repos.set(repo, Math.max(repos.get(repo) ?? 0, rw));
+}
+
+function sumWeights(repos: Map<string, number>): number {
+  let total = 0;
+  for (const v of repos.values()) total += v;
+  return total;
 }
 
 /** Default age after which the profile is rescanned lazily on the next use. */
@@ -147,19 +212,55 @@ export function buildProfileView(store: Store): ProfileView {
   const rows = store.allProfileRows();
   const languages = new Set<string>();
   const categoryIncumbents = new Map<string, string[]>();
+  const categoryStrength = new Map<string, number>();
+  const affinities = new Map<string, number>();
+  const uncategorized: string[] = [];
+  const highConfCats = new Set<string>();
+  const lowConfCats = new Set<string>();
+
   for (const r of rows) {
     if (r.kind === "language") languages.add(r.label.toLowerCase());
+    if (r.kind === "affinity") {
+      affinities.set(r.label, (affinities.get(r.label) ?? 0) + r.weight);
+      continue;
+    }
+    if (r.kind === "library" && r.category === null) uncategorized.push(r.label);
     if (r.category) {
-      if (!categoryIncumbents.has(r.category)) categoryIncumbents.set(r.category, []);
-      categoryIncumbents.get(r.category)!.push(r.label);
+      categoryStrength.set(
+        r.category,
+        (categoryStrength.get(r.category) ?? 0) + r.weight * r.confidence,
+      );
+      if (r.confidence >= INCUMBENT_CONFIDENCE) {
+        highConfCats.add(r.category);
+        if (!categoryIncumbents.has(r.category)) categoryIncumbents.set(r.category, []);
+        categoryIncumbents.get(r.category)!.push(r.label);
+      } else {
+        lowConfCats.add(r.category);
+      }
     }
   }
-  return { languages, categoryIncumbents, rows, isEmpty: rows.length === 0 };
+
+  const inferredCategories = new Set<string>();
+  for (const c of lowConfCats) if (!highConfCats.has(c)) inferredCategories.add(c);
+
+  return {
+    languages,
+    categoryIncumbents,
+    categoryStrength,
+    inferredCategories,
+    archetypes: inferArchetypes(categoryStrength),
+    affinities,
+    uncategorized,
+    rows,
+    isEmpty: rows.length === 0,
+  };
 }
 
 /**
  * Record an accept/reject/install decision. Installing or accepting a tool adds
- * its categories to the profile so similar tools later read as "replaces".
+ * its categories to the profile so similar tools later read as "replaces". Every
+ * decision — accept or reject — also nudges a learned affinity per category and
+ * language, so the profile infers what kinds of tools you tend to take or pass on.
  */
 export function recordDecision(
   store: Store,
@@ -169,6 +270,20 @@ export function recordDecision(
 ): ProfileView {
   const now = Math.floor(Date.now() / 1000);
   store.setDecision(tool.id, decision, note, now);
+
+  // Learn affinities from behavior: +1 toward what you accept/install, -1 away
+  // from what you reject, accumulated per category and per language.
+  const delta = decision === "rejected" ? -1 : 1;
+  const decisionCats = categorize({
+    name: tool.name,
+    topics: tool.topics,
+    description: tool.description,
+  });
+  for (const cat of decisionCats) {
+    store.bumpAffinity(`affinity:cat:${cat}`, cat, cat, delta, now);
+  }
+  const lang = tool.language?.toLowerCase();
+  if (lang) store.bumpAffinity(`affinity:lang:${lang}`, lang, null, delta, now);
 
   if (decision === "installed" || decision === "accepted") {
     const cats = categorize({ name: tool.name, topics: tool.topics, description: tool.description });

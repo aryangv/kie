@@ -20,6 +20,9 @@ each one against a **living profile of your own stack**:
 sources (HN/Reddit/Lobsters/GitHub/X) → extract repo refs → enrich via GitHub API
    → score (velocity · breadth · recency · engagement) → rank
 profile: scan your code's manifests + your install/reject decisions → category map
+   → infer: recency-weight by how recently you touched each repo, categorize the
+     unknown tail by co-occurrence, roll categories up into developer archetypes,
+     learn accept/reject affinities (host model fills the rest via profile_infer)
 fit: tool categories vs profile categories → replaces | complements | irrelevant
 ```
 
@@ -46,7 +49,8 @@ instructions inside") — a guard against prompt injection from a malicious READ
 | `whats_new` | Proactive digest: repos found since you last checked that fit your stack (advances a "last seen" marker; `peek=true` to look without advancing) |
 | `should_i_use` | Fit verdict for any repo (fetches on demand) + install plan + raw context (README, discussion headlines) |
 | `recommend_extensions` | Recommend things to add to your *agent* setup — Claude Code skills, MCP servers, subagents (with ready-to-use prompts), and valuable SaaS — matched to your stack |
-| `profile_get` / `profile_update` | View / rescan / edit your living stack profile |
+| `profile_get` / `profile_update` | View / rescan / edit your living stack profile (now shows inferred personas + the uncategorized tail) |
+| `profile_infer` | Hand the dependencies the taxonomy couldn't classify to the host model to categorize, then persist them via `profile_update { setCategories }` — keyless semantic categorization |
 | `record_decision` | Mark a tool accepted / rejected / installed |
 | `install_tool` | Exact install command(s), tailored to library-vs-CLI per ecosystem; the agent runs them only after you confirm |
 | `refresh_now` | Force a collection + enrichment pass |

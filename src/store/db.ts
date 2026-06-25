@@ -71,10 +71,13 @@ CREATE TABLE IF NOT EXISTS scores (
 -- Profile tables (populated in Slice 2; created now so the schema is stable).
 CREATE TABLE IF NOT EXISTS profile (
   key       TEXT PRIMARY KEY,   -- e.g. "language:typescript", "library:react"
-  kind      TEXT NOT NULL,      -- language | library | tool | category
+  kind      TEXT NOT NULL,      -- language | library | tool | affinity | category
   label     TEXT NOT NULL,
   category  TEXT,               -- taxonomy category this item covers (nullable)
   weight    REAL NOT NULL DEFAULT 1,
+  -- 1.0 = directly observed; <1 = inferred (co-occurrence / host model). The fit
+  -- classifier only treats high-confidence rows as "incumbents".
+  confidence REAL NOT NULL DEFAULT 1,
   updated_at INTEGER NOT NULL
 );
 
@@ -84,6 +87,7 @@ CREATE TABLE IF NOT EXISTS profile_signals (
   manifest   TEXT NOT NULL,     -- e.g. package.json
   dependency TEXT NOT NULL,
   seen_at    INTEGER NOT NULL,
+  mtime      INTEGER,           -- manifest file mtime (unix s); recency-of-work signal
   UNIQUE (repo_path, manifest, dependency)
 );
 
@@ -137,6 +141,17 @@ const MIGRATIONS: Migration[] = [
   // `UPDATE tools SET ... readme = ?` would throw "no such column: readme".
   // Backfill it (no-op where BASE_SCHEMA already provided it).
   { version: 2, up: (db) => addColumnIfMissing(db, "tools", "readme", "TEXT") },
+  // v3 — inference layer: `profile.confidence` (observed vs inferred rows) and
+  // `profile_signals.mtime` (recency-of-work weighting). Both guarded so this is
+  // a no-op on a fresh DB that already got them from BASE_SCHEMA and an ALTER on
+  // an older one.
+  {
+    version: 3,
+    up: (db) => {
+      addColumnIfMissing(db, "profile", "confidence", "REAL NOT NULL DEFAULT 1");
+      addColumnIfMissing(db, "profile_signals", "mtime", "INTEGER");
+    },
+  },
 ];
 
 /** The schema version a freshly-migrated DB ends at. */
@@ -359,13 +374,23 @@ export class Store {
 
   // ---- profile signals -----------------------------------------------------
 
-  addSignal(repoPath: string, manifest: string, dependency: string, now: number) {
+  addSignal(
+    repoPath: string,
+    manifest: string,
+    dependency: string,
+    now: number,
+    mtime: number | null = null,
+  ) {
+    // Refresh seen_at + mtime on re-scan so the recency signal tracks the latest
+    // observation rather than freezing at first sight.
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO profile_signals(repo_path, manifest, dependency, seen_at)
-         VALUES (?, ?, ?, ?)`,
+        `INSERT INTO profile_signals(repo_path, manifest, dependency, seen_at, mtime)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(repo_path, manifest, dependency) DO UPDATE SET
+           seen_at = excluded.seen_at, mtime = excluded.mtime`,
       )
-      .run(repoPath, manifest, dependency, now);
+      .run(repoPath, manifest, dependency, now, mtime);
   }
 
   allSignals(): SignalRow[] {
@@ -387,17 +412,35 @@ export class Store {
     label: string;
     category: string | null;
     weight: number;
+    confidence?: number;
     now: number;
   }) {
     this.db
       .prepare(
-        `INSERT INTO profile(key, kind, label, category, weight, updated_at)
-         VALUES (@key, @kind, @label, @category, @weight, @now)
+        `INSERT INTO profile(key, kind, label, category, weight, confidence, updated_at)
+         VALUES (@key, @kind, @label, @category, @weight, @confidence, @now)
          ON CONFLICT(key) DO UPDATE SET
            label = excluded.label, category = excluded.category,
-           weight = excluded.weight, updated_at = excluded.updated_at`,
+           weight = excluded.weight, confidence = excluded.confidence,
+           updated_at = excluded.updated_at`,
       )
-      .run(row);
+      .run({ confidence: 1, ...row });
+  }
+
+  /**
+   * Increment an affinity row's signed weight (learned from accept/reject
+   * decisions): +1 nudges toward a category/language, -1 away. Distinct from
+   * upsertProfileRow because it accumulates rather than replaces.
+   */
+  bumpAffinity(key: string, label: string, category: string | null, delta: number, now: number) {
+    this.db
+      .prepare(
+        `INSERT INTO profile(key, kind, label, category, weight, confidence, updated_at)
+         VALUES (?, 'affinity', ?, ?, ?, 1, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           weight = weight + excluded.weight, updated_at = excluded.updated_at`,
+      )
+      .run(key, label, category, delta, now);
   }
 
   allProfileRows(): ProfileRow[] {
@@ -430,6 +473,7 @@ export interface SignalRow {
   manifest: string;
   dependency: string;
   seen_at: number;
+  mtime: number | null;
 }
 
 export interface ProfileRow {
@@ -438,6 +482,7 @@ export interface ProfileRow {
   label: string;
   category: string | null;
   weight: number;
+  confidence: number;
   updated_at: number;
 }
 
