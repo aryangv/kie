@@ -6,7 +6,7 @@
 
 A **trending dev-tool radar that runs as an MCP server** inside Claude Code and Cursor. It:
 1. Watches where developers talk (Hacker News, Reddit, Lobsters, GitHub trending, X/Twitter), extracts the GitHub repos/tools being discussed, enriches them via the GitHub API, and scores popularity 0–100.
-2. Keeps a **living profile of the user's stack** (auto-scanned from local code manifests + their install/reject decisions).
+2. Keeps a **living, inference-based profile of the user's stack** — auto-scanned from local code manifests + install/reject decisions, then *inferred over*: recency-weighted by how recently each repo was touched, the unknown-dependency tail categorized by co-occurrence (with a keyless host-model lane, `profile_infer`, for the rest), rolled up into developer **archetypes**, and tracking learned accept/reject **affinities**. (See the "Inference-based profile building" section below.)
 3. Judges each tool against that profile: **replaces** ("you already do this"), **complements** ("fills a gap — here's how to install"), or **irrelevant**.
 4. Also recommends **Claude Code extensions** (skills, plugins, MCP servers, subagents) and **valuable SaaS** (with "how to get it"), matched to the profile.
 
@@ -17,7 +17,7 @@ A **trending dev-tool radar that runs as an MCP server** inside Claude Code and 
 ## Stack & how to work with it
 - **TypeScript / Node 22**, ESM (`"type": "module"`, `NodeNext`). better-sqlite3, zod, `@modelcontextprotocol/sdk`.
 - Build: `./node_modules/.bin/tsc -p tsconfig.json` (NOT `npx tsc` — that pulls a bogus package).
-- Test: `node --test --import tsx "src/**/*.test.ts"` (Node native test runner; **135 tests, all passing**).
+- Test: `node --test --import tsx "src/**/*.test.ts"` (Node native test runner; **151 tests, all passing**).
 - The Bash tool's cwd may drift; prefix commands with `cd /c/Users/aryan/code/trendscout &&`.
 - Tests are offline (fixtures); live behavior is checked via `scripts/smoke-*.ts` (MCP client driving the built server).
 
@@ -83,7 +83,8 @@ The profile was a dictionary lookup (dep → hardcoded category, with **unknown 
 - **`match/fit.ts`:** soft affinity note appended to verdict reasons (never overrides the structural verdict; guarded so it's inert when `affinities` is absent).
 - **Host-model lane:** new `profile_infer` tool returns the uncategorized deps + context and asks the host model to categorize them; `profile_update` gained `setCategories: [{library, category}]` to persist those as inferred rows (confidence 0.9). This is the keyless way to classify the long tail — consistent with the endorsed `should_i_use` pattern, NOT a Kie-owned API key.
 - **`mcp/format.ts`:** `formatProfile` now shows "Looks like: <personas>", inferred (`~category`) lines, learned preferences, and the uncategorized tail (sampled). New `formatProfileInfer`.
-- **Tests 135 → 148** — `match/infer.test.ts` (recency/co-occurrence/archetypes), profile recency+inference+affinity tests, v3-migration column-backfill test, server tool count 11→12.
+- **Tests 135 → 151** — `match/infer.test.ts` (recency/co-occurrence/archetypes), profile recency+inference+affinity tests, v3-migration column-backfill test, server tool count 11→12, plus the **host-model lane**: `formatProfileInfer` both-branch unit tests (tail + "nothing to infer", injection hygiene) and a server round-trip test (`profile_infer` responds no-network; `profile_update { setCategories }` persists a lowercased, confidence-0.9 inferred row that surfaces in `profile_get`).
+- **Shipped:** merged to `main` and pushed to `origin` (github.com/aryangv/kie) as commits `fa5c1bb` (feature) + `4aacb27` (host-model lane tests).
 
 ## Final polish: README fetch + description sanitization (#2 micro-opt & #4 residual)
 - **README fetch no longer pays 5 sequential 404s** (`enrich/github.ts`). `fetchReadme` now tries `README.md` alone first (one request — the ~95% case), and only on a miss probes the rarer names (`readme.md`/`.markdown`/`.rst`/`.txt`) **in parallel** via `fetchReadmeFile`. README-less/oddly-named repos cost one extra round-trip instead of four more sequential ones; the common case is unchanged at one request.
@@ -165,7 +166,7 @@ Done in two halves, both pure + tested (`match/taxonomy.test.ts`, additions to `
 
 ### 🟡 Scope / polish
 10. **Folder still named `trendscout`** (rename to `kie` when the editor lock is gone). Update the `claude mcp add` path after.
-11. **No LICENSE, no `repository` field in package.json, no CI.** Test coverage now broad (sources incl. Reddit/Twitter, enrich, scanner, install, discussion, db, migrations, and the MCP server wiring via an in-memory transport all covered). Real remaining gap is just **CI + LICENSE + `repository` field + npm publish** — all git/ship-gated.
+11. ~~**No LICENSE, no `repository` field, no CI.**~~ ✅ mostly done — LICENSE (MIT), CI workflow (`.github/workflows/ci.yml`), and the repo are all live on GitHub (github.com/aryangv/kie). Test coverage is broad (sources incl. Reddit/Twitter, enrich, scanner, install, discussion, db, migrations, the profile **inference layer**, and the MCP server wiring via an in-memory transport). Remaining gap is just **npm publish** (deferred).
 12. ~~**Taxonomy lacks design/creative/animation categories** + no new-language scanning.~~ ✅ **DONE this session** — added `animation`/`design`/`creative` categories (fixed the Motion → "replaces" root cause: dropped the over-broad `react`/`vue`/`svelte` *topic* → ui-framework mapping), rewired curated creative SaaS, and added manifest parsers + dep mappings for Ruby/PHP/Java/Kotlin/C#/Dart. (Remaining adjacent polish: the taxonomy is still keyword-seeded — niche/new tools without a known dep/topic/keyword still land "uncategorized"; that's the long tail an optional LLM-classify pass would cover.)
 13. ~~**Plugin-provided skills aren't filesystem-detectable**~~ ✅ **DONE this session** — `Extension.bundled` flags ships-with-Claude-Code skills (docx/pdf/xlsx/skill-creator); they're now surfaced as "Built in (ships with Claude Code)" instead of "worth adding," whether or not they're on disk. (`installed.ts` still also scans plugin skill dirs for anything genuinely installed there.)
 14. **SaaS auto-discovery** is out of reach without NER + a non-GitHub signal — curated only by design.
@@ -180,16 +181,16 @@ Done in two halves, both pure + tested (`match/taxonomy.test.ts`, additions to `
 6b. ~~Expand taxonomy to design/animation/creative + new languages (#12)~~ ✅ done — creative categories + Ruby/PHP/Java/C#/Dart scanning.
 7. ~~DB migrations (#5)~~ ✅ done — `user_version` runner; protects an existing DB across schema changes during active dev, not just at ship time.
 7b. ~~Reddit/X pagination parity~~ ✅ done — both follow their cursors (`after` / `next_token`) up to a configurable page cap, gated by the existing credential check (inert without keys). Note: comment/reply *scanning* still doesn't port to Reddit/X (no cheap comment-search like HN's Algolia), so this is the pagination half only.
-8. LICENSE + npm publish + IDE registration — to actually ship (#11). NB: folder is not yet a git repo (intentionally held off for now).
+8. LICENSE + npm publish + IDE registration — to actually ship (#11). The repo is now **live on GitHub** (github.com/aryangv/kie, MIT, CI workflow present); the remaining ship gate is **npm publish** (deferred) and the cosmetic **folder rename** (#10).
 
-**The non-git-gated backlog is now fully cleared** — all 🔴/🟠 items and the minor polish (README fetch #2, description sanitization #4) are done. Everything remaining is git/ship-gated (#10 folder rename, #11 LICENSE/CI/`repository`/npm publish) or declined by design (#14 SaaS auto-discovery, LLM-classify). **The next real milestone is the git/ship decision** — there is no further quality/correctness work to do under the no-git constraint without the user opening new scope.
+**The quality/correctness backlog is cleared** — all 🔴/🟠 items, the minor polish (README fetch #2, description sanitization #4), and the inference-based profile work are done and pushed to `main`. Everything remaining is ship-gated (#10 folder rename, #11 npm publish) or declined by design (#14 SaaS auto-discovery, LLM-classify). The code is in git and on the remote; the next real milestone is the **npm-publish decision** (and the public/private flip noted in memory).
 
 ## Build / test / run
 ```bash
 cd /c/Users/aryan/code/trendscout
 npm install
 ./node_modules/.bin/tsc -p tsconfig.json          # build
-node --test --import tsx "src/**/*.test.ts"        # 135 tests
+node --test --import tsx "src/**/*.test.ts"        # 151 tests
 node --import tsx scripts/smoke.ts                 # boot + tool list (offline)
 node --import tsx scripts/smoke-autoscan.ts        # profile auto-scan (offline-ish)
 node --import tsx scripts/smoke-setup.ts           # setup + curated starters (scans real ~/code)
