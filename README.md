@@ -181,4 +181,4 @@ while an IDE session is open and can't push messages on its own:
 
 ## License
 
-[MIT](LICENSE) © Aryan Gaddala
+[MIT](LICENSE) © Venkata Aryan Gaddala

@@ -4,7 +4,7 @@
   "description": "Trending dev-tool radar with personalized fit, as an MCP server for Claude Code and Cursor",
   "type": "module",
   "license": "MIT",
-  "author": "Aryan Gaddala <aryangaddala7@gmail.com>",
+  "author": "Venkata Aryan Gaddala <aryangaddala7@gmail.com>",
   "homepage": "https://github.com/aryangv/kie#readme",
   "repository": {
     "type": "git",
