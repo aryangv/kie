@@ -11,7 +11,7 @@ import { Store } from "../store/db.js";
 // Drive the real server over an in-memory transport (no stdio, no build step) to
 // prove the tool wiring: every tool registers with a valid schema, and a
 // no-network handler responds end-to-end.
-test("server registers all 12 tools and serves a no-network handler", async () => {
+test("server registers all 13 tools and serves a no-network handler", async () => {
   const prevRoots = process.env.KIE_CODE_ROOTS;
   // Point the profile scan at an empty dir so ensureProfileFresh touches nothing real.
   process.env.KIE_CODE_ROOTS = mkdtempSync(join(tmpdir(), "kie-srv-test-"));
@@ -24,11 +24,11 @@ test("server registers all 12 tools and serves a no-network handler", async () =
 
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    assert.equal(names.length, 12, `expected 12 tools, got ${names.join(", ")}`);
+    assert.equal(names.length, 13, `expected 13 tools, got ${names.join(", ")}`);
     for (const expected of [
       "whats_trending", "tool_details", "whats_new", "should_i_use", "profile_get",
-      "profile_update", "profile_infer", "recommend_extensions", "record_decision",
-      "install_tool", "refresh_now", "setup",
+      "profile_update", "profile_infer", "recommend_extensions", "recommend_for_goal",
+      "record_decision", "install_tool", "refresh_now", "setup",
     ]) {
       assert.ok(names.includes(expected), `missing tool: ${expected}`);
     }
@@ -76,6 +76,32 @@ test("host-model lane: profile_infer responds and profile_update persists setCat
 
     const profile = await client.callTool({ name: "profile_get", arguments: {} });
     assert.match(textOf(profile), /ai-tool/, "inferred category surfaces in the profile");
+  } finally {
+    await client.close();
+    store.close();
+    prevRoots === undefined ? delete process.env.KIE_CODE_ROOTS : (process.env.KIE_CODE_ROOTS = prevRoots);
+  }
+});
+
+test("recommend_for_goal: unknown goal returns the menu (no network)", async () => {
+  const prevRoots = process.env.KIE_CODE_ROOTS;
+  process.env.KIE_CODE_ROOTS = mkdtempSync(join(tmpdir(), "kie-goal-test-"));
+  const store = new Store(":memory:");
+  const client = new Client({ name: "test", version: "0.0.0" });
+  try {
+    const server = createKieServer(store);
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverT), client.connect(clientT)]);
+
+    // A goal with no curated playbook hits the menu path, which makes no network
+    // call (it returns before the discovery/enrichment lanes), so it's offline-safe.
+    const res = await client.callTool({
+      name: "recommend_for_goal",
+      arguments: { goal: "I want to learn the violin", discover: false },
+    });
+    const text = (res.content as { type: string; text: string }[])[0].text;
+    assert.match(text, /don't have a curated playbook/i);
+    assert.match(text, /Reduce token usage/);
   } finally {
     await client.close();
     store.close();

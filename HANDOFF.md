@@ -11,13 +11,13 @@ A **trending dev-tool radar that runs as an MCP server** inside Claude Code and 
 4. Also recommends **Claude Code extensions** (skills, plugins, MCP servers, subagents) and **valuable SaaS** (with "how to get it"), matched to the profile.
 
 ## ⚠️ Critical naming note
-- The **product is "Kie."** All code, env vars (`KIE_*`), data dir (`~/.kie/`), package (`kie-mcp`), and the MCP server identity say "kie."
+- The **product is "Kie."** All code, env vars (`KIE_*`), data dir (`~/.kie/`), and the MCP server identity say "kie." The **npm package** is `kie-radar` (`kie-mcp` was taken by an unrelated package); bins are `kie-radar` (server) + `kie-radar-daemon`.
 - The **folder on disk is still `C:\Users\aryan\code\trendscout`** — a directory rename failed (the editor had it locked). Renaming the folder to `kie` is a pending cosmetic task. Everything *inside* is already Kie.
 
 ## Stack & how to work with it
 - **TypeScript / Node 22**, ESM (`"type": "module"`, `NodeNext`). better-sqlite3, zod, `@modelcontextprotocol/sdk`.
 - Build: `./node_modules/.bin/tsc -p tsconfig.json` (NOT `npx tsc` — that pulls a bogus package).
-- Test: `node --test --import tsx "src/**/*.test.ts"` (Node native test runner; **151 tests, all passing**).
+- Test: `node --test --import tsx "src/**/*.test.ts"` (Node native test runner; **165 tests, all passing**).
 - The Bash tool's cwd may drift; prefix commands with `cd /c/Users/aryan/code/trendscout &&`.
 - Tests are offline (fixtures); live behavior is checked via `scripts/smoke-*.ts` (MCP client driving the built server).
 
@@ -34,8 +34,8 @@ src/
     collector.ts          # run all enabled sources, persist mentions+tools (isolates failures)
   enrich/github.ts        # GitHub REST metadata + README excerpt (raw.githubusercontent)
   scoring/
-    score.ts              # PURE composite score (velocity/breadth/recency/engagement)
-    ranker.ts             # store-backed: build features -> scoreTools -> rank
+    score.ts              # PURE composite score (velocity/breadth/recency/engagement/established); trending|established weight profiles
+    ranker.ts             # store-backed: build features -> scoreTools -> rank; sort mode gates the candidate set
   profile/
     scanner.ts            # walk code roots, parse manifests -> ScannedSignal[]
     profile.ts            # living profile: rebuild, ensureProfileFresh (auto-scan), recordDecision
@@ -46,6 +46,7 @@ src/
   recommend/
     curated.ts            # curated "starter tools" list (ripgrep, fzf, Obsidian, ...)
     digest.ts             # buildDigest: "what's new since watermark" delta
+    playbooks.ts          # goal-driven recs: PLAYBOOKS catalog + pure matchPlaybook/isMaintained + discovery/enrich lanes
   extensions/             # Claude Code extension recommender (skills/plugins/mcp/subagent/saas)
     catalog.ts            # Extension model + CURATED_EXTENSIONS (incl. SaaS + subagent kinds)
     installed.ts          # scan ~/.claude/skills, agents, plugins, mcp config (best-effort)
@@ -56,13 +57,13 @@ src/
     refresh.ts            # lazy "refresh if stale" (collect + enrich + metrics snapshot)
     daemon.ts             # standalone background process -> writes ~/.kie/digest.md
   mcp/
-    server.ts             # MCP server: createKieServer(store) wires 11 tools; main() guarded by isMain
+    server.ts             # MCP server: createKieServer(store) wires 13 tools; main() guarded by isMain
     format.ts             # all human-readable formatting
 scripts/smoke-*.ts        # live verification harnesses (MCP client -> built server)
 ```
 
-## The 12 MCP tools (in server.ts)
-`setup`, `whats_trending`, `tool_details`, `whats_new`, `should_i_use`, `profile_get`, `profile_update`, `profile_infer`, `recommend_extensions`, `record_decision`, `install_tool`, `refresh_now`.
+## The 13 MCP tools (in server.ts)
+`setup`, `whats_trending`, `tool_details`, `whats_new`, `should_i_use`, `profile_get`, `profile_update`, `profile_infer`, `recommend_extensions`, `recommend_for_goal`, `record_decision`, `install_tool`, `refresh_now`.
 
 ## Key design decisions (don't relitigate without reason)
 - **MCP server, not CLI/web** — both IDEs speak MCP; single backend.
@@ -75,7 +76,24 @@ scripts/smoke-*.ts        # live verification harnesses (MCP client -> built ser
 - **Fit categorization stays keyword-based — no LLM API, ever.** The taxonomy (`match/taxonomy.ts`) is a deterministic dep/topic/keyword seed and is grown by *adding entries*, not by calling a model. An "LLM-classify pass" for the uncategorized tail was explicitly declined (user: "no LLM APIs for us") — it conflicts with Kie's keyless identity, the interactive path (`should_i_use`) already puts the host model in the loop with raw README context, and MCP sampling was already rejected. When the `⚠ unsure` tail is too long, **expand the seed** (it's cheap, testable, keyless). Do not add an optional API-key classify path without the user reopening this.
 - **`recommend_extensions` discovery defaults stay rich (don't cap for keyless safety).** The subagent drill (`drillRepos`/`filesPerRepo`) is API-hungry and can exhaust the unauthenticated 60/hr REST budget (discovery then degrades to `[]`). That's a deliberate accepted tradeoff: the expected deployment is **with a `GITHUB_TOKEN`**, so we optimize the catalog richness for the equipped common case rather than thinning everyone's output to protect keyless users (who already degrade gracefully). If the audience shifts to mostly-keyless, *then* lower the `DiscoverOptions` defaults — don't do it preemptively.
 
-## Inference-based profile building (latest)
+## Established value as a scoring signal + `whats_trending sort` (latest)
+Addresses a real bias the user flagged: the radar only valued **momentum**, so older-but-useful repos were penalized — and worse, **structurally excluded** (the ranker only scored repos with a mention *inside the window*). Now value is a first-class signal and there's a mode to rank by it. **Does NOT contradict the OPEN ISSUE #1 fix** (which removed *absolute size masquerading as velocity*); this adds absolute value as its own clearly-separate term.
+- **`scoring/score.ts`:** the composite is now **five** signals — added `established` = `log1p(stars)` normalized on the cohort (log-scaled like velocity/engagement so a 200k-star repo doesn't flatten the cohort), **damped ×0.5 when the repo looks unmaintained**. Two weight profiles via `ScoreMode`: `trending` (velocity .30 / breadth .18 / recency .15 / engagement .17 / **established .20**) and `established` (velocity .10 / breadth .20 / recency .05 / engagement .20 / **established .45**). `scoreTools(features, { mode })`; `ToolFeatures.maintained?` feeds the damping. `ScoreBreakdown` gained `established`.
+- **`scoring/ranker.ts`:** `RankOptions.sort?: ScoreMode`. **The gate is mode-dependent** — `trending` keeps the "mentioned in window" gate; `established` considers **every repo Kie has ever seen mentioned** and scores it on all-time signal, so a flat-growth workhorse surfaces. `maintained` computed per-tool via `isMaintained(tool.pushedAt, now)` (imported from `recommend/playbooks.ts` — pure, no cycle). Established runs persist under a `${window}:established` score key so they don't clobber trending scores.
+- **Schema v4 (migration, guarded):** `tools.pushed_at INTEGER`, persisted in `applyRepoMeta` (was fetched in `RepoMeta.pushedAt` but dropped). Null until the next enrich → scorer treats null maintenance as "unknown" (no penalty). Also **hardened `addColumnIfMissing`** to no-op when the *table* is absent (a synthetic/partial legacy DB without `tools` no longer crashes a column-add).
+- **`mcp/server.ts` / `mcp/format.ts`:** `whats_trending` gained `sort: "trending" | "established"`. `formatTrendingList(entries, window, mode)` switches the header and, in established mode, flags `⚠ looks unmaintained` per stale repo (local `isMaintainedTool` mirror to keep `format.ts` off the network module).
+- **Caveat (by design):** established can only rank repos Kie has *seen mentioned at some point* — it resurfaces fallen-off-the-radar tools, it doesn't discover never-trending ones (no corpus otherwise). That was the explicit scope (A+B, not a separate crawl).
+- **Tests 161 → 165** — `score.test.ts` (established beats spiking newcomer in established mode; momentum still leads trending; unmaintained damping; established added to the bounded-range check), `ranker.test.ts` (old repo excluded by trending but surfaced by established; mode-namespaced score key), `store/db.test.ts` (v4 `pushed_at` backfilled on legacy upgrade). The live trending-vs-established diff is logic-proven by the ranker test (the real `~/.kie/kie.db` was empty at implementation time, so no live demo).
+
+## Goal-driven recommendations (latest — `recommend_for_goal`)
+A new axis: `recommend_extensions` matches the user's **stack**; `recommend_for_goal` matches a **stated goal** ("I want to reduce my token usage"). It returns ranked **options, each with pros/cons + how-to**. Stays keyless and host-model-friendly like the rest of Kie.
+- **`recommend/playbooks.ts` (new):** a `Playbook` = `{ goal, match[], summary, options[], discoverQuery? }`; a `PlaybookOption` = `{ name, what, pros[], cons[], how[], builtin?, repoRef?, … }`. Curated `PLAYBOOKS` ships **one** entry — `reduce-token-usage` — but the model generalizes (faster-CI / observability are just more entries). **Pure + tested:** `matchPlaybook(goal)` (whole-word for single triggers so "token" ≠ "tokenizer"; phrase match for multi-word; best-score wins) and `isMaintained(pushedAt, now)` (≤1yr push). **Network lanes (best-effort, return []/no-op on failure):** `discoverPlaybookOptions(query, excludeRefs)` (GitHub repo search → community options flagged `⚠ community — verify`, with stars + maintained) and `resolveRepoOption(opt, store)` (folds live stars + `isMaintained` + the existing discussion signal into repo-backed curated options).
+- **`mcp/format.ts`:** `formatPlaybook(pb, options)` (option blocks: built-in / ⚠ community flags, `★stars · 💬 discussion · ⚠ looks unmaintained` signal line, pros/cons/how) and `formatPlaybookMenu(playbooks)` (no-match → hands the goal menu to the host model, profile_infer-style). Reuses `sanitizeInline` for untrusted one-liners.
+- **`mcp/server.ts`:** `recommend_for_goal({ goal, discover? })` — match → clone options → (if `discover` && `discoverQuery`) search GitHub for community tools (dedup vs curated repoRefs) → resolve live signal on every repo-backed option → format. No-match returns the menu **before** any network (offline-safe). Warms the mention store non-blocking like `recommend_extensions`.
+- **The token playbook content (curated, editorial):** subagents / `/compact` / skills / trim-CLAUDE.md (built-in, cheapest-first), then Memory MCP, ccusage (`ryoppippi/ccusage`), LLMLingua (`microsoft/LLMLingua`, flagged API-pipelines-only). **Deliberately did NOT hardcode unverified repos** (e.g. a "ponytail") — the discovery lane surfaces live community token tools (`claude-context-optimizer`, `claude-token-optimizer`, …) flagged for verification instead of asserting they exist.
+- **Tests 151 → 161** — `recommend/playbooks.test.ts` (matchPlaybook phrasings/word-boundary/phrase/best-score, isMaintained, curated-shape, `formatPlaybook` flags+signal, `formatPlaybookMenu`) + server round-trip for the offline no-match menu path. The matched path's live lanes are verified by smoke (real stars + discovery), not unit tests, to keep the suite offline.
+
+## Inference-based profile building
 The profile was a dictionary lookup (dep → hardcoded category, with **unknown deps dropped**) plus a raw repo count. It's now an **inference layer** — all keyless/deterministic for the base, with a host-model lane on top, so it does NOT reopen the "no LLM API" decision (Kie still calls no model of its own; the host IDE Claude does the fuzzy tail).
 - **`match/infer.ts` (new, pure, tested):** `recencyWeight(at, now)` (half-life decay, `RECENCY_HALF_LIFE_DAYS=60`, floored at 0.05), `inferCategoriesByCooccurrence(...)` (an unknown dep borrows the dominant category of the deps it ships alongside — gated by `MIN_COOCCURRENCE_SUPPORT=2` repos + `MIN_COOCCURRENCE_SHARE=0.5`, capped at `MAX_COOCCURRENCE_CONFIDENCE=0.6`), `inferArchetypes(categoryStrength)` (rolls categories up into frontend/backend/ai-ml/devops-infra/mobile-desktop/creative-design/quality-tooling personas).
 - **`profile/profile.ts`:** `rebuildProfile` now (1) recency-weights each dep by manifest mtime — all-fresh signals reduce to the old repo count, so prior tests hold; (2) co-occurrence-infers the unknown tail; (3) **keeps everything else as raw uncategorized library rows — nothing is dropped.** `ProfileView` gained `categoryStrength`, `inferredCategories`, `archetypes`, `affinities`, `uncategorized` (all optional → existing `ProfileView` literals in tests still compile). `buildProfileView` only treats rows with `confidence >= INCUMBENT_CONFIDENCE` (0.75) as `categoryIncumbents`, so low-confidence inferences enrich strength/archetypes **without** triggering spurious "replaces". `recordDecision` now also learns **affinities**: +1/−1 per category and language on every accept/install/reject.
@@ -190,7 +208,7 @@ Done in two halves, both pure + tested (`match/taxonomy.test.ts`, additions to `
 cd /c/Users/aryan/code/trendscout
 npm install
 ./node_modules/.bin/tsc -p tsconfig.json          # build
-node --test --import tsx "src/**/*.test.ts"        # 151 tests
+node --test --import tsx "src/**/*.test.ts"        # 165 tests
 node --import tsx scripts/smoke.ts                 # boot + tool list (offline)
 node --import tsx scripts/smoke-autoscan.ts        # profile auto-scan (offline-ish)
 node --import tsx scripts/smoke-setup.ts           # setup + curated starters (scans real ~/code)
@@ -224,7 +242,7 @@ node --import tsx scripts/smoke-daemon.ts          # daemon digest pass (offline
 ```bash
 claude mcp add kie -- node C:/Users/aryan/code/trendscout/dist/mcp/server.js
 ```
-Cursor: equivalent entry in `.cursor/mcp.json` (command `node`, args `[".../dist/mcp/server.js"]`, optional `env` block). Background digest: `npx kie-daemon` / `npm run daemon`.
+Or, once published: `claude mcp add kie -- npx -y kie-radar`. Cursor: equivalent entry in `.cursor/mcp.json` (command `npx`, args `["-y", "kie-radar"]`, or `node` + `[".../dist/mcp/server.js"]`, optional `env` block). Background digest: `npx -y -p kie-radar kie-radar-daemon` / `npm run daemon`.
 
 ## Original plan file
 `C:\Users\aryan\.claude\plans\so-i-want-to-reflective-corbato.md` (the approved v1 plan).

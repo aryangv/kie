@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS tools (
   topics        TEXT NOT NULL DEFAULT '[]',
   current_stars INTEGER NOT NULL DEFAULT 0,
   readme        TEXT,
+  pushed_at     INTEGER,
   first_seen    INTEGER NOT NULL
 );
 
@@ -117,6 +118,12 @@ interface Migration {
   up: (db: Database.Database) => void;
 }
 
+function tableExists(db: Database.Database, table: string): boolean {
+  return !!db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(table);
+}
+
 function columnExists(db: Database.Database, table: string, column: string): boolean {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   return cols.some((c) => c.name === column);
@@ -128,6 +135,10 @@ function addColumnIfMissing(
   column: string,
   decl: string,
 ) {
+  // No-op if the table itself doesn't exist yet: on a real DB the base schema
+  // (v1) creates it before any column-add migration runs; a partial/legacy DB
+  // that lacks it entirely shouldn't crash the column-add.
+  if (!tableExists(db, table)) return;
   if (!columnExists(db, table, column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
   }
@@ -152,6 +163,10 @@ const MIGRATIONS: Migration[] = [
       addColumnIfMissing(db, "profile_signals", "mtime", "INTEGER");
     },
   },
+  // v4 — `tools.pushed_at` for the established/maintained signals. Backfilled by
+  // the next enrichment pass; null until then (the scorer treats null as
+  // "unknown maintenance", applying no penalty). Guarded for new vs. older DBs.
+  { version: 4, up: (db) => addColumnIfMissing(db, "tools", "pushed_at", "INTEGER") },
 ];
 
 /** The schema version a freshly-migrated DB ends at. */
@@ -191,6 +206,7 @@ export interface ToolRow {
   topics: string;
   current_stars: number;
   readme: string | null;
+  pushed_at: number | null;
   first_seen: number;
 }
 
@@ -205,6 +221,7 @@ function rowToTool(r: ToolRow): Tool {
     topics: JSON.parse(r.topics) as string[],
     currentStars: r.current_stars,
     readme: r.readme,
+    pushedAt: r.pushed_at,
     firstSeen: r.first_seen,
   };
 }
@@ -266,7 +283,7 @@ export class Store {
   applyRepoMeta(toolId: number, meta: RepoMeta) {
     this.db
       .prepare(
-        `UPDATE tools SET description = ?, language = ?, topics = ?, current_stars = ?, readme = ?
+        `UPDATE tools SET description = ?, language = ?, topics = ?, current_stars = ?, readme = ?, pushed_at = ?
          WHERE id = ?`,
       )
       .run(
@@ -275,6 +292,7 @@ export class Store {
         JSON.stringify(meta.topics),
         meta.stars,
         meta.readme,
+        meta.pushedAt,
         toolId,
       );
   }

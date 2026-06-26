@@ -99,6 +99,7 @@ test("upgrades a legacy DB (pre-readme tools table) without losing data", () => 
     | undefined;
   assert.equal(row?.name, "repo", "existing row preserved");
   assert.equal(row?.readme, null, "new column defaults to null");
+  assert.ok(hasColumn(db, "tools", "pushed_at"), "pushed_at backfilled (v4)");
   // Tables introduced by the base schema are created during the upgrade too.
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[];
   for (const t of ["mentions", "tool_metrics", "scores", "profile", "decisions"]) {

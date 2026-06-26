@@ -19,7 +19,7 @@ test("scores are bounded 0..100 and sub-scores 0..1", () => {
   const scores = scoreTools([feat({ toolId: 1 }), feat({ toolId: 2, stars: 5000 })]);
   for (const b of scores.values()) {
     assert.ok(b.score >= 0 && b.score <= 100, `score ${b.score} out of range`);
-    for (const k of ["velocity", "breadth", "recency", "engagement"] as const) {
+    for (const k of ["velocity", "breadth", "recency", "engagement", "established"] as const) {
       assert.ok(b[k] >= 0 && b[k] <= 1, `${k} ${b[k]} out of range`);
     }
   }
@@ -83,4 +83,27 @@ test("velocity normalization is log-scaled so a viral outlier doesn't flatten th
   assert.ok(scores.get(2)!.velocity > scores.get(1)!.velocity);
   // ...but a linear norm would crush the mid repo to ~0.001; log keeps it alive.
   assert.ok(scores.get(1)!.velocity > 0.3, `mid velocity ${scores.get(1)!.velocity} too flattened`);
+});
+
+test("established mode: proven stars beat a spiking newcomer", () => {
+  const proven = feat({ toolId: 1, stars: 50000, starsDelta: 0, maintained: true });
+  const newcomer = feat({ toolId: 2, stars: 200, starsDelta: 800, maintained: true });
+  const est = scoreTools([proven, newcomer], { mode: "established" });
+  assert.ok(
+    est.get(1)!.score > est.get(2)!.score,
+    "the proven repo should win the established profile despite zero momentum",
+  );
+  // The same two in trending mode let the surging newcomer compete on velocity.
+  const tr = scoreTools([proven, newcomer], { mode: "trending" });
+  assert.ok(tr.get(2)!.velocity > tr.get(1)!.velocity);
+});
+
+test("an unmaintained repo is damped on the established signal", () => {
+  const stale = feat({ toolId: 1, stars: 50000, maintained: false });
+  const fresh = feat({ toolId: 2, stars: 50000, maintained: true });
+  const est = scoreTools([stale, fresh], { mode: "established" });
+  assert.ok(
+    est.get(2)!.established > est.get(1)!.established,
+    "equal stars, but the maintained repo scores higher on established",
+  );
 });

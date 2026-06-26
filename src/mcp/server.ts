@@ -35,10 +35,18 @@ import { annotateDiscussion } from "../extensions/discussion.js";
 import { recommendExtensions, mergeExtensions } from "../extensions/recommend.js";
 import { buildInstallPlan, formatInstallPlan } from "../install/install.js";
 import {
+  PLAYBOOKS,
+  matchPlaybook,
+  discoverPlaybookOptions,
+  resolveRepoOption,
+} from "../recommend/playbooks.js";
+import {
   formatDigest,
   formatExtensionRecs,
   formatFit,
   formatInstallSummary,
+  formatPlaybook,
+  formatPlaybookMenu,
   formatProfile,
   formatProfileInfer,
   formatRichContext,
@@ -93,15 +101,21 @@ export function createKieServer(store: Store): McpServer {
     {
       title: "What's trending",
       description:
-        "List GitHub repos/tools currently trending across Hacker News, Reddit, Lobsters " +
-        "and GitHub, each with a 0-100 popularity score and a fit tag against your profile.",
+        "List GitHub repos/tools across Hacker News, Reddit, Lobsters and GitHub, each with " +
+        "a 0-100 popularity score and a fit tag against your profile. sort='trending' (default) " +
+        "ranks by momentum (what's hot now); sort='established' ranks by proven, still-maintained " +
+        "value across everything Kie has seen — surfacing older, useful repos that aren't spiking.",
       inputSchema: {
         window: z.enum(["24h", "7d", "30d"]).optional().describe("Time window (default 7d)"),
         language: z.string().optional().describe("Filter by primary language, e.g. TypeScript"),
         limit: z.number().int().min(1).max(50).optional().describe("Max results (default 15)"),
+        sort: z
+          .enum(["trending", "established"])
+          .optional()
+          .describe("'trending' (default, momentum) or 'established' (proven, maintained value)"),
       },
     },
-    async ({ window, language, limit }) => {
+    async ({ window, language, limit, sort }) => {
       // Serve cached data immediately; revalidate in the background so the next
       // call sees fresher data. A blocking refresh here can hang 30s–2min on the
       // first call of a session.
@@ -112,11 +126,12 @@ export function createKieServer(store: Store): McpServer {
         language,
         limit: limit ?? 15,
         sourceCount: enabledSourceCount(),
+        sort,
       });
       if (entries.length === 0 && warming) return text(WARMING_MESSAGE);
       const profile = ensureProfileFresh(store);
       for (const e of entries) e.fit = classifyFit(e.tool, profile);
-      return text(formatTrendingList(entries, win));
+      return text(formatTrendingList(entries, win, sort ?? "trending"));
     },
   );
 
@@ -393,6 +408,43 @@ export function createKieServer(store: Store): McpServer {
         recs.filter((r) => r.ext.discovered && r.status !== "installed").map((r) => resolveInstall(r.ext)),
       );
       return text(formatExtensionRecs(recs, scan.note));
+    },
+  );
+
+  server.registerTool(
+    "recommend_for_goal",
+    {
+      title: "Recommend for a goal",
+      description:
+        "Given a plain-language goal (e.g. 'I want to reduce my token usage', 'speed up CI'), " +
+        "return the available options with pros, cons, and how to implement each — built-in " +
+        "Claude Code features, curated tools, and (with discovery on) fresh community tools " +
+        "flagged for verification. Distinct from recommend_extensions, which matches your " +
+        "stack rather than a stated goal.",
+      inputSchema: {
+        goal: z.string().describe("What you're trying to achieve, in plain language"),
+        discover: z
+          .boolean()
+          .optional()
+          .describe("Also search GitHub for community tools matching the goal (default true)"),
+      },
+    },
+    async ({ goal, discover }) => {
+      const pb = matchPlaybook(goal, PLAYBOOKS);
+      if (!pb) return text(formatPlaybookMenu(PLAYBOOKS));
+      // Warm the mention store so the discussion signal on repo-backed options
+      // fills over repeated use (non-blocking, like recommend_extensions).
+      ensureFreshInBackground(store, MAX_CACHE_AGE_HOURS);
+      // Clone so we never mutate the module-level catalog across calls.
+      const options = pb.options.map((o) => ({ ...o }));
+      if (discover !== false && pb.discoverQuery) {
+        const covered = new Set(options.map((o) => o.repoRef).filter((r): r is string => !!r));
+        const found = await discoverPlaybookOptions(pb.discoverQuery, covered).catch(() => []);
+        options.push(...found);
+      }
+      // Fold in live stars / maintenance / discussion for every repo-backed option.
+      await Promise.all(options.filter((o) => o.repoRef).map((o) => resolveRepoOption(o, store)));
+      return text(formatPlaybook(pb, options));
     },
   );
 

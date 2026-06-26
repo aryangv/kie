@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // Standalone "here's what's new" daemon. The MCP server only runs while an IDE
 // session is open and can't push messages on its own, so this is the piece that
 // works in the background: on an interval it refreshes the sources and writes a
