@@ -163,12 +163,20 @@ machine.
 
 ### Register in Claude Code
 
+The simplest path uses the published package via `npx` (no clone/build):
+
 ```bash
-claude mcp add kie -- node /absolute/path/to/kie/dist/mcp/server.js
+claude mcp add kie -- npx -y kie-radar
 # with credentials:
 claude mcp add kie \
   -e GITHUB_TOKEN=ghp_xxx -e REDDIT_CLIENT_ID=xxx -e REDDIT_CLIENT_SECRET=xxx \
-  -- node /absolute/path/to/kie/dist/mcp/server.js
+  -- npx -y kie-radar
+```
+
+Or point at a local build instead of npx:
+
+```bash
+claude mcp add kie -- node /absolute/path/to/kie/dist/mcp/server.js
 ```
 
 ### Register in Cursor (`.cursor/mcp.json`)
@@ -177,8 +185,8 @@ claude mcp add kie \
 {
   "mcpServers": {
     "kie": {
-      "command": "node",
-      "args": ["/absolute/path/to/kie/dist/mcp/server.js"],
+      "command": "npx",
+      "args": ["-y", "kie-radar"],
       "env": { "GITHUB_TOKEN": "ghp_xxx" }
     }
   }
@@ -205,7 +213,7 @@ while an IDE session is open and can't push messages on its own:
    kept current even when the IDE is closed:
 
    ```bash
-   npm run daemon          # or: npx kie-daemon
+   npm run daemon          # or: npx -y -p kie-radar kie-radar-daemon
    ```
 
    It refreshes on an interval (`KIE_DIGEST_INTERVAL_MIN`, default 360 = 6h) and
@@ -221,7 +229,8 @@ while an IDE session is open and can't push messages on its own:
   **co-occurrence inference**, and — for the rest — `profile_infer`, which hands the leftovers
   to the host IDE model to categorize (the same "host model is the reasoning layer" pattern
   `should_i_use` uses over the raw README).
-- npm publish, for a one-command install path.
+- npm: packaged as [`kie-radar`](https://www.npmjs.com/package/kie-radar) for a one-command
+  install (`npx -y kie-radar`).
 
 ## License
 

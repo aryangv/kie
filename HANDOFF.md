@@ -11,7 +11,7 @@ A **trending dev-tool radar that runs as an MCP server** inside Claude Code and 
 4. Also recommends **Claude Code extensions** (skills, plugins, MCP servers, subagents) and **valuable SaaS** (with "how to get it"), matched to the profile.
 
 ## ⚠️ Critical naming note
-- The **product is "Kie."** All code, env vars (`KIE_*`), data dir (`~/.kie/`), package (`kie-mcp`), and the MCP server identity say "kie."
+- The **product is "Kie."** All code, env vars (`KIE_*`), data dir (`~/.kie/`), and the MCP server identity say "kie." The **npm package** is `kie-radar` (`kie-mcp` was taken by an unrelated package); bins are `kie-radar` (server) + `kie-radar-daemon`.
 - The **folder on disk is still `C:\Users\aryan\code\trendscout`** — a directory rename failed (the editor had it locked). Renaming the folder to `kie` is a pending cosmetic task. Everything *inside* is already Kie.
 
 ## Stack & how to work with it
@@ -242,7 +242,7 @@ node --import tsx scripts/smoke-daemon.ts          # daemon digest pass (offline
 ```bash
 claude mcp add kie -- node C:/Users/aryan/code/trendscout/dist/mcp/server.js
 ```
-Cursor: equivalent entry in `.cursor/mcp.json` (command `node`, args `[".../dist/mcp/server.js"]`, optional `env` block). Background digest: `npx kie-daemon` / `npm run daemon`.
+Or, once published: `claude mcp add kie -- npx -y kie-radar`. Cursor: equivalent entry in `.cursor/mcp.json` (command `npx`, args `["-y", "kie-radar"]`, or `node` + `[".../dist/mcp/server.js"]`, optional `env` block). Background digest: `npx -y -p kie-radar kie-radar-daemon` / `npm run daemon`.
 
 ## Original plan file
 `C:\Users\aryan\.claude\plans\so-i-want-to-reflective-corbato.md` (the approved v1 plan).
