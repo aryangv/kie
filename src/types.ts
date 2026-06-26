@@ -63,6 +63,9 @@ export interface Tool {
   currentStars: number;
   /** README excerpt cached at enrichment time; undefined if not yet fetched. */
   readme?: string | null;
+  /** Unix seconds of the repo's last push, from enrichment. Drives the
+   * maintained/established signals. Undefined/null when not yet enriched. */
+  pushedAt?: number | null;
   firstSeen: number;
 }
 
@@ -72,6 +75,8 @@ export interface ScoreBreakdown {
   breadth: number; // 0..1 normalized
   recency: number; // 0..1 normalized
   engagement: number; // 0..1 normalized
+  /** Established/proven adoption: log-scaled absolute stars × maintained. 0..1. */
+  established: number;
   /** Final 0..100 composite. */
   score: number;
 }

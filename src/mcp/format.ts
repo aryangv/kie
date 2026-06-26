@@ -7,6 +7,7 @@ import type { InstallPlan } from "../install/install.js";
 import type { StarterRec } from "../recommend/curated.js";
 import type { Digest } from "../recommend/digest.js";
 import type { ExtensionRec } from "../extensions/recommend.js";
+import type { Playbook, PlaybookOption } from "../recommend/playbooks.js";
 
 const SOURCE_LABEL: Record<string, string> = {
   hackernews: "HN",
@@ -35,22 +36,42 @@ export function sanitizeInline(text: string, max = 200): string {
   return oneLine.length > max ? oneLine.slice(0, max).trimEnd() + "…" : oneLine;
 }
 
-export function formatTrendingList(entries: TrendingEntry[], window: string): string {
+export function formatTrendingList(
+  entries: TrendingEntry[],
+  window: string,
+  mode: "trending" | "established" = "trending",
+): string {
   if (entries.length === 0) {
-    return `No trending repos found for window ${window}. Try a wider window or run refresh_now.`;
+    return `No ${mode} repos found for window ${window}. Try a wider window or run refresh_now.`;
   }
+  const established = mode === "established";
   const lines = entries.map((e, i) => {
     const t = e.tool;
     const lang = t.language ? ` · ${t.language}` : "";
     const stars = t.currentStars ? ` · ⭐ ${t.currentStars.toLocaleString()}` : "";
     const desc = t.description ? `\n   ${sanitizeInline(t.description)}` : "";
     const fit = e.fit ? ` · fit: ${e.fit.verdict}` : "";
+    // In established mode the value signal is proven adoption + maintenance, so
+    // flag a repo that looks stale rather than implying it's a safe pick.
+    const stale =
+      established && isMaintainedTool(t) === false ? " · ⚠ looks unmaintained" : "";
     return (
-      `${i + 1}. ${t.repoRef}  [score ${e.breakdown.score}]${lang}${stars}${fit}\n` +
+      `${i + 1}. ${t.repoRef}  [score ${e.breakdown.score}]${lang}${stars}${fit}${stale}\n` +
       `   ${e.mentionCount} mention(s) across ${sourcesLabel(e.sources)} · ${t.url}${desc}`
     );
   });
-  return `Trending (window ${window}):\n\n${lines.join("\n\n")}`;
+  const header = established
+    ? `Established (proven & maintained, window ${window} for momentum)`
+    : `Trending (window ${window})`;
+  return `${header}:\n\n${lines.join("\n\n")}`;
+}
+
+/** Whether a tool's last push looks recent enough to call it maintained.
+ * Mirrors recommend/playbooks.isMaintained without importing the network module. */
+function isMaintainedTool(t: Tool): boolean | undefined {
+  if (t.pushedAt == null) return undefined;
+  const yearSec = 365 * 24 * 60 * 60;
+  return Math.floor(Date.now() / 1000) - t.pushedAt <= yearSec;
 }
 
 export function formatDigest(digest: Digest): string {
@@ -344,5 +365,73 @@ export function formatProfileInfer(view: ProfileView): string {
     "  profile_update { setCategories: [ { library: \"<name>\", category: \"<category>\" }, … ] }\n\n" +
     "Those become inferred profile entries (lower confidence than observed deps), " +
     "enriching fit verdicts and archetypes."
+  );
+}
+
+/** One option block in a playbook: name + flags, live signal, pros/cons, how-to. */
+function formatPlaybookOption(opt: PlaybookOption, i: number): string {
+  const flags: string[] = [];
+  if (opt.builtin) flags.push("built-in");
+  if (opt.discovered) flags.push("⚠ community — verify");
+  const flag = flags.length ? `  [${flags.join(", ")}]` : "";
+
+  // Live signal line: stars, discussion heat, maintenance — only what we know.
+  const bits: string[] = [];
+  if (opt.url) bits.push(opt.url);
+  if (opt.stars !== undefined) bits.push(`★ ${opt.stars.toLocaleString()}`);
+  if (opt.discussion) {
+    const d = opt.discussion;
+    bits.push(
+      `💬 ${sourcesLabel(d.sources)} (${d.mentionCount} mention${d.mentionCount === 1 ? "" : "s"}, ${d.points} pts)`,
+    );
+  }
+  if (opt.maintained === false) bits.push("⚠ looks unmaintained (no recent commits)");
+  const signal = bits.length ? `\n   ${bits.join("  ·  ")}` : "";
+
+  const pros = opt.pros.map((p) => `     + ${sanitizeInline(p, 240)}`).join("\n");
+  const cons = opt.cons.map((c) => `     - ${sanitizeInline(c, 240)}`).join("\n");
+  const how = opt.how.map((h) => `     › ${h}`).join("\n");
+  return (
+    `${i + 1}. ${opt.name}${flag}\n` +
+    `   ${sanitizeInline(opt.what, 280)}${signal}\n` +
+    `   Pros:\n${pros}\n` +
+    `   Cons:\n${cons}\n` +
+    `   How:\n${how}`
+  );
+}
+
+/**
+ * Render a matched playbook: the goal framing plus each option with pros, cons,
+ * and how to implement it. `options` is the (possibly enriched + discovery-
+ * augmented) list the server resolved, so curated and community options render
+ * through the same block.
+ */
+export function formatPlaybook(pb: Playbook, options: PlaybookOption[]): string {
+  const blocks = options.map((o, i) => formatPlaybookOption(o, i));
+  return (
+    `Goal: ${pb.title}\n\n${pb.summary}\n\n` +
+    `Options:\n\n${blocks.join("\n\n")}\n\n` +
+    "Pick one (or ask me to compare two). Once you choose, I can wire it up — " +
+    "install_tool for the repo-backed ones, or record_decision to remember what you adopted."
+  );
+}
+
+/**
+ * No curated playbook matched the goal. Rather than guess, hand the host model the
+ * menu of goals Kie does have playbooks for plus a nudge to either pick the closest
+ * or reason from the raw goal — the same host-model-in-the-loop pattern as
+ * profile_infer. (We deliberately don't echo the user's goal text back into the
+ * prompt unfenced.)
+ */
+export function formatPlaybookMenu(playbooks: Playbook[]): string {
+  const goals = playbooks.map((p) => `  - ${p.title} (e.g. "${p.match.slice(0, 3).join('", "')}")`).join("\n");
+  return (
+    "I don't have a curated playbook that clearly matches that goal yet. " +
+    "Playbooks I do have:\n\n" +
+    goals +
+    "\n\nIf the user's goal is close to one of these, call recommend_for_goal again with " +
+    "a phrasing that includes its keywords. Otherwise, reason from the goal directly using " +
+    "the user's profile (profile_get) and whats_trending — and consider whether this is a " +
+    "goal worth adding as a new playbook."
   );
 }

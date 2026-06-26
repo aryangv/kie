@@ -100,6 +100,48 @@ test("measuredStarsDelta uses the pre-cutoff baseline and clamps negatives", () 
   assert.equal(measuredStarsDelta([metric({ captured_at: now, stars: 10 })], cutoff), undefined);
 });
 
+test("established mode surfaces an old useful repo that trending excludes", () => {
+  const store = new Store(":memory:");
+  const now = Math.floor(Date.now() / 1000);
+  const old = now - 60 * 24 * 3600; // last discussed 60 days ago — outside any window
+
+  // An old, well-established, still-maintained repo, only ever mentioned long ago.
+  const t = store.upsertTool("old/gold", "https://github.com/old/gold", "gold", now);
+  store.applyRepoMeta(t, metaFor("old/gold", "gold", 80000, now)); // pushedAt: now -> maintained
+  store.insertMention(
+    mention({ source: "hackernews", externalId: "hn-old", repoRef: "old/gold", points: 100, createdAt: old }),
+    t,
+  );
+
+  // Trending gates on a mention inside the window -> the old repo is invisible.
+  const trending = rankTrending(store, { window: "7d", limit: 10 });
+  assert.equal(trending.find((e) => e.tool.repoRef === "old/gold"), undefined);
+
+  // Established considers everything Kie has ever seen -> the old repo surfaces.
+  const established = rankTrending(store, { window: "7d", limit: 10, sort: "established" });
+  assert.ok(
+    established.find((e) => e.tool.repoRef === "old/gold"),
+    "established mode includes the old, useful repo regardless of recent buzz",
+  );
+  store.close();
+});
+
+test("established scores are persisted under a mode-namespaced window key", () => {
+  const store = seed();
+  rankTrending(store, { window: "7d", limit: 10, sort: "established" });
+  const est = store.db
+    .prepare("SELECT COUNT(*) c FROM scores WHERE time_window = '7d:established'")
+    .get() as { c: number };
+  assert.ok(est.c >= 1, "established run persisted under '7d:established'");
+  // And it didn't clobber a plain trending '7d' key.
+  rankTrending(store, { window: "7d", limit: 10 });
+  const tr = store.db.prepare("SELECT COUNT(*) c FROM scores WHERE time_window = '7d'").get() as {
+    c: number;
+  };
+  assert.ok(tr.c >= 1, "trending '7d' scores coexist");
+  store.close();
+});
+
 test("velocity tracks measured star delta, not absolute star count", () => {
   const store = new Store(":memory:");
   const now = Math.floor(Date.now() / 1000);

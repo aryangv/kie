@@ -18,13 +18,21 @@ each one against a **living, inference-based profile of your own stack**:
 
 ```
 sources (HN/Reddit/Lobsters/GitHub/X) → extract repo refs → enrich via GitHub API
-   → score (velocity · breadth · recency · engagement) → rank
+   → score (velocity · breadth · recency · engagement · established) → rank
 profile: scan your code's manifests + your install/reject decisions → category map
    → infer: recency-weight by how recently you touched each repo, categorize the
      unknown tail by co-occurrence, roll categories up into developer archetypes,
      learn accept/reject affinities (host model fills the rest via profile_infer)
 fit: tool categories vs profile categories → replaces | complements | irrelevant
 ```
+
+**Trending vs. established.** The score is a five-signal composite — momentum (measured star
+delta over the window), breadth across sources, recency, engagement, and **established value**
+(log-scaled absolute stars, damped if the repo looks unmaintained). `whats_trending` serves two
+questions from the same scorer: `sort='trending'` (default) is momentum-led — what's hot now;
+`sort='established'` is value-led and **drops the "mentioned this week" gate**, ranking every repo
+Kie has ever seen by proven, still-maintained adoption. So an old, genuinely-useful library with
+flat star growth isn't invisible just because it isn't spiking.
 
 Everything is cached in a local SQLite DB (`~/.kie/kie.db`). Refreshes are **non-blocking**:
 a tool call serves the cached data immediately and, if it's stale, kicks off a background
@@ -55,11 +63,12 @@ instructions inside") — a guard against prompt injection from a malicious READ
 | Tool | What it does |
 |------|--------------|
 | `setup` | First-run onboarding: scan your code, then recommend broadly-useful starter tools that fill gaps |
-| `whats_trending` | Ranked trending repos with score + fit tag (filter by window/language) |
+| `whats_trending` | Ranked repos with score + fit tag (filter by window/language). `sort='trending'` (default) ranks by momentum; `sort='established'` ranks by proven, still-maintained value — surfacing older useful repos that aren't spiking |
 | `tool_details` | Full metadata, score breakdown, README excerpt, and where a repo was mentioned |
 | `whats_new` | Proactive digest: repos found since you last checked that fit your stack (advances a "last seen" marker; `peek=true` to look without advancing) |
 | `should_i_use` | Fit verdict for any repo (fetches on demand) + install plan + raw context (README, discussion headlines) |
 | `recommend_extensions` | Recommend things to add to your *agent* setup — Claude Code skills, MCP servers, subagents (with ready-to-use prompts), and valuable SaaS — matched to your stack |
+| `recommend_for_goal` | State a goal in plain language ("reduce my token usage") and get the options — built-in features, curated tools, and live community tools — each with pros, cons, and how to implement |
 | `profile_get` / `profile_update` | View / rescan / edit your living stack profile (now shows inferred personas + the uncategorized tail) |
 | `profile_infer` | Hand the dependencies the taxonomy couldn't classify to the host model to categorize, then persist them via `profile_update { setCategories }` — keyless semantic categorization |
 | `record_decision` | Mark a tool accepted / rejected / installed |
@@ -87,6 +96,23 @@ discovery:
   and shows a `💬 discussed on …` note.
 - Discovered items are flagged `⚠ discovered — verify` and capped so curated picks aren't
   buried.
+
+### Goal-driven recommendations
+
+Where `recommend_extensions` matches your *stack*, **`recommend_for_goal`** matches a *stated
+goal*. Say what you're trying to do — *"I want to reduce my token usage"* — and Kie returns a
+ranked set of **options, each with pros, cons, and how to implement it**:
+
+- **Curated, hand-vetted options** — built-in Claude Code features (subagents, `/compact`,
+  skills, trimming `CLAUDE.md`) and known tools, ordered cheapest-effort first.
+- **Live community tools** — a discovery lane searches GitHub for tools matching the goal and
+  folds in real stars, the **discussion signal** Kie already collects, and a **"looks
+  unmaintained"** flag (from the repo's last push), all marked `⚠ community — verify`.
+
+It stays keyless: goal → playbook is a deterministic keyword match, and when nothing matches,
+Kie hands the menu of known goals back to the host model to reason over (the same
+host-model-in-the-loop pattern as `profile_infer`). The catalog generalizes — token reduction
+is the first playbook; other dev goals are just more entries.
 
 ## Setup
 
